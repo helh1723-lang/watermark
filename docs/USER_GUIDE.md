@@ -33,7 +33,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_env.ps1 -Use
 | PDF | pdf | pdf | keep/strong 两层 |
 | DOCX | docx | docx/pdf | keep 输出 DOCX，strong 输出 PDF |
 | DOC | doc | docx/pdf | 需要 LibreOffice 转换 |
-| 视频 | mp4/mov/avi/mkv/webm/m4v | mp4 | 默认输出 MP4，使用快速关键帧认证水印 |
+| 视频 | mp4/mov/avi/mkv/webm/m4v | mp4 | 默认输出 MP4，使用全帧快速认证水印 |
 
 ## 5. 口令与认证
 

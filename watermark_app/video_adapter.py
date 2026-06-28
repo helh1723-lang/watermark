@@ -50,31 +50,28 @@ def _frame_interval(fps: float, profile: str) -> int:
     return max(1, int(round(max(fps, 1.0) * seconds)))
 
 
-def _mark_frame_indices(frames_total: int, fps: float, profile: str) -> set[int]:
+def _sample_frame_indices(frames_total: int, fps: float, max_frames: int) -> list[int]:
     if frames_total <= 0:
-        return set()
-    targets = {
-        "invisible": 3,
-        "balanced": 6,
-        "durable": 10,
-        "benchmark": 12,
-        "video": 8,
-    }
-    count = min(frames_total, targets.get(profile, 6))
-    duration = frames_total / max(fps, 1.0)
-    indices: set[int] = set()
+        return []
+    limit = max(1, min(frames_total, max_frames))
+    indices: list[int] = []
+    seen: set[int] = set()
 
-    early_count = min(count, max(1, int(min(duration, 4))))
-    for second in range(early_count):
-        indices.add(min(frames_total - 1, int(round(second * fps))))
+    def add(index: int) -> None:
+        index = max(0, min(frames_total - 1, int(index)))
+        if index not in seen and len(indices) < limit:
+            seen.add(index)
+            indices.append(index)
 
-    remaining = count - len(indices)
-    if remaining == 1:
-        indices.add(frames_total // 2)
-    elif remaining > 1:
-        for slot in range(remaining):
-            ratio = slot / max(1, remaining - 1)
-            indices.add(min(frames_total - 1, int(round(ratio * (frames_total - 1)))))
+    add(0)
+    for second in range(1, min(6, int(frames_total / max(fps, 1.0)) + 1)):
+        add(round(second * fps))
+    for ratio in (0.10, 0.25, 0.50, 0.75, 0.90, 0.98):
+        add(round((frames_total - 1) * ratio))
+    cursor = 0
+    while len(indices) < limit:
+        add(cursor)
+        cursor += max(1, int(round(max(fps, 1.0))))
     return indices
 
 
@@ -173,8 +170,7 @@ def embed_video(
             cap.release()
             raise RuntimeError("OpenCV could not create the output video.")
 
-        marked_indices = _mark_frame_indices(frames_total, fps, carrier_profile)
-        interval = _frame_interval(fps, carrier_profile)
+        progress_step = max(1, int(round(max(fps, 1.0))))
         quality_psnr = 0.0
         quality_ssim = 0.0
         paper_diff = 0.0
@@ -188,30 +184,27 @@ def embed_video(
             ok, frame = cap.read()
             if not ok:
                 break
-            should_mark = index in marked_indices if marked_indices else frames_marked < 4 and index % interval == 0
-            if should_mark:
-                if progress_callback:
-                    frame_label = f"{index + 1}/{frames_total}" if frames_total else str(index + 1)
+            if progress_callback:
+                frame_label = f"{index + 1}/{frames_total}" if frames_total else str(index + 1)
+                if index % progress_step == 0:
                     progress_callback(10 + min(75, (index / max(1, frames_total or index + 1)) * 75), f"写入视频帧 {frame_label}")
-                frame_path = tmp_dir / f"frame_{index:08d}.png"
-                marked_path = tmp_dir / f"marked_{index:08d}.png"
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                Image.fromarray(rgb).save(frame_path)
-                marked_output, repeat = embed_packet_into_image(
-                    frame_path,
-                    tmp_dir,
-                    auth_packet,
-                    password,
-                    output_name=marked_path.name,
-                    strength="video",
-                )
-                marked_rgb = cv2.cvtColor(cv2.imread(str(marked_output)), cv2.COLOR_BGR2RGB)
-                frame = cv2.cvtColor(marked_rgb, cv2.COLOR_RGB2BGR)
-                tiles_total += repeat
-                tiles_used += repeat
-                frames_marked += 1
-            elif progress_callback and frames_total and index % max(1, int(round(fps))) == 0:
-                progress_callback(10 + min(75, (index / frames_total) * 75), f"编码视频帧 {index + 1}/{frames_total}")
+            frame_path = tmp_dir / f"frame_{index:08d}.png"
+            marked_path = tmp_dir / f"marked_{index:08d}.png"
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            Image.fromarray(rgb).save(frame_path)
+            marked_output, repeat = embed_packet_into_image(
+                frame_path,
+                tmp_dir,
+                auth_packet,
+                password,
+                output_name=marked_path.name,
+                strength="video",
+            )
+            marked_rgb = cv2.cvtColor(cv2.imread(str(marked_output)), cv2.COLOR_BGR2RGB)
+            frame = cv2.cvtColor(marked_rgb, cv2.COLOR_RGB2BGR)
+            tiles_total += repeat
+            tiles_used += repeat
+            frames_marked += 1
             writer.write(frame)
             index += 1
         cap.release()
@@ -248,6 +241,7 @@ def extract_video(
     if not cap.isOpened():
         raise RuntimeError("OpenCV could not open the video file.")
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+    frames_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     interval = max(1, int(round(max(fps, 1.0))))
     frames_checked = 0
     frames_verified = 0
@@ -256,48 +250,69 @@ def extract_video(
     saved_frames: list[Path] = []
     with tempfile.TemporaryDirectory(prefix="iwm_video_read_") as tmp_name:
         tmp_dir = Path(tmp_name)
-        index = 0
-        while frames_checked < max_frames:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if index % interval == 0:
-                frame_path = tmp_dir / f"read_{index:08d}.png"
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                Image.fromarray(rgb).save(frame_path)
-                saved_frames.append(frame_path)
-                frames_checked += 1
-                try:
-                    extracted = extract_fixed_packet_legacy(frame_path, password)
-                    frames_verified += 1
-                    if best is None or extracted.confidence > best.confidence:
-                        best = extracted
-                except Exception as exc:
-                    last_error = exc
-                    try:
-                        extracted = extract_image(frame_path, password, deep_scan=False)
-                        frames_verified += 1
-                        if best is None or extracted.confidence > best.confidence:
-                            best = extracted
-                    except Exception as fallback_exc:
-                        last_error = fallback_exc
-            index += 1
+        frame_indices = _sample_frame_indices(frames_total, fps, max_frames)
+
+        def try_frame(frame, index: int, use_deep_scan: bool = False) -> bool:
+            nonlocal best, frames_checked, frames_verified, last_error
+            frame_path = tmp_dir / f"read_{index:08d}_{frames_checked:03d}.png"
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            Image.fromarray(rgb).save(frame_path)
+            saved_frames.append(frame_path)
+            frames_checked += 1
+            try:
+                extracted = extract_fixed_packet_legacy(frame_path, password)
+                frames_verified += 1
+                if best is None or extracted.confidence > best.confidence:
+                    best = extracted
+                return True
+            except Exception as exc:
+                last_error = exc
+            try:
+                extracted = extract_image(frame_path, password, deep_scan=use_deep_scan)
+                frames_verified += 1
+                if best is None or extracted.confidence > best.confidence:
+                    best = extracted
+                return True
+            except Exception as exc:
+                last_error = exc
+                return False
+
+        if frame_indices:
+            for index in frame_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+                ok, frame = cap.read()
+                if ok and try_frame(frame, index, False):
+                    break
+        else:
+            index = 0
+            while frames_checked < max_frames:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if index % interval == 0 and try_frame(frame, index, False):
+                    break
+                index += 1
+
         if best is None and deep_scan:
             for frame_path in saved_frames[: min(3, len(saved_frames))]:
                 try:
-                    extracted = extract_fixed_packet_legacy(frame_path, password)
+                    extracted = extract_image(frame_path, password, deep_scan=True)
                     frames_verified += 1
                     if best is None or extracted.confidence > best.confidence:
                         best = extracted
+                    break
                 except Exception as exc:
                     last_error = exc
-                    try:
-                        extracted = extract_image(frame_path, password, deep_scan=True)
-                        frames_verified += 1
-                        if best is None or extracted.confidence > best.confidence:
-                            best = extracted
-                    except Exception as fallback_exc:
-                        last_error = fallback_exc
+        if best is None and not frame_indices:
+            index = 0
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            while frames_checked < max_frames:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if index % interval == 0 and try_frame(frame, index, deep_scan):
+                    break
+                index += 1
     cap.release()
     if best is None:
         detail = f": {last_error}" if last_error else ""

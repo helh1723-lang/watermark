@@ -35,6 +35,27 @@ def make_video(path: Path) -> None:
     writer.release()
 
 
+def make_tail_clip(source: Path, target: Path, start_frame: int = 5) -> None:
+    cap = cv2.VideoCapture(str(source))
+    if not cap.isOpened():
+        raise RuntimeError("OpenCV could not open the marked video.")
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 6.0)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    writer = cv2.VideoWriter(str(target), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError("OpenCV could not create a clipped smoke-test video.")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        writer.write(frame)
+    cap.release()
+    writer.release()
+
+
 def main() -> int:
     if TMP.exists():
         shutil.rmtree(TMP)
@@ -45,9 +66,17 @@ def main() -> int:
     make_video(source)
 
     embedded = embed_video(source, TMP, "video smoke auth", password, profile="durable")
+    assert embedded.frames_marked == embedded.frames_total
     recovered = extract_video(embedded.output_path, password, max_frames=4)
     assert recovered.payload.watermark_id == embedded.watermark_id
     assert recovered.frames_verified >= 1
+    assert recovered.frames_checked <= 2
+
+    clipped = TMP / "source_wm_tail_clip.mp4"
+    make_tail_clip(embedded.output_path, clipped)
+    recovered_clip = extract_video(clipped, password, max_frames=2)
+    assert recovered_clip.payload.watermark_id == embedded.watermark_id
+    assert recovered_clip.frames_checked <= 2
 
     print("Video smoke test passed.")
     print(f"Video: {embedded.output_path}")
