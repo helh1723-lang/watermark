@@ -1,0 +1,8 @@
+Pillow
+numpy
+pypdf
+python-docx
+reportlab
+opencv-python
+PyWavelets
+scikit-image

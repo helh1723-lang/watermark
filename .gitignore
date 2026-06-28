@@ -1,0 +1,15 @@
+.runtime/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+web/node_modules/
+web/dist/
+
+output/
+tmp/
+tset source/
+
+.DS_Store
+Thumbs.db
