@@ -53,6 +53,7 @@ PROFILES: dict[str, ProfileConfig] = {
     "balanced": ProfileConfig("balanced", 6.5, 128, 64, 22, 6, 44.0, 0.988, 0.90, (1.0, 0.85, 0.70, 0.55, 0.45)),
     "durable": ProfileConfig("durable", 20.0, 256, 128, 18, 4, 38.0, 0.975, 1.80, (1.0, 0.90, 0.80, 0.70), "compare"),
     "benchmark": ProfileConfig("benchmark", 12.0, 256, 128, 16, 4, 40.0, 0.980, 1.60, (1.0, 0.90, 0.75), "compare"),
+    "video": ProfileConfig("video", 38.0, 256, 128, 18, 4, 30.0, 0.900, 5.00, (1.0, 0.90, 0.80), "compare"),
 }
 
 STRENGTH_TO_PROFILE = {
@@ -547,7 +548,7 @@ def _select_embed_tiles(
         )
 
     def profile_order(tiles: list[Tile]) -> list[Tile]:
-        if profile_name in {"durable", "benchmark"}:
+        if profile_name in {"durable", "benchmark", "video"}:
             margin = max(24, int(min(y_array.shape) * 0.06))
 
             def near_border(tile: Tile) -> bool:
@@ -562,19 +563,19 @@ def _select_embed_tiles(
         return tiles
 
     feature_budget = 0
-    if profile_name in {"balanced", "durable", "benchmark"}:
-        if profile_name in {"durable", "benchmark"}:
+    if profile_name in {"balanced", "durable", "benchmark", "video"}:
+        if profile_name in {"durable", "benchmark", "video"}:
             feature_budget = min(8, max(4, config.max_tiles // 2))
         else:
             feature_budget = min(6, max(3, config.max_tiles // 3))
-    if profile_name in {"durable", "benchmark"}:
+    if profile_name in {"durable", "benchmark", "video"}:
         grid_budget = config.min_tiles
     else:
         grid_budget = max(config.min_tiles, config.max_tiles - feature_budget)
 
     selected: list[Tile] = []
     seen: set[tuple[int, int, int]] = set()
-    overlap_limit = 0.40 if profile_name in {"durable", "benchmark"} else 0.65
+    overlap_limit = 0.40 if profile_name in {"durable", "benchmark", "video"} else 0.65
 
     def overlap_ratio(first: Tile, second: Tile) -> float:
         x0 = max(first.x, second.x)
@@ -617,7 +618,7 @@ def _select_embed_tiles(
             if len(selected) > before:
                 added_features += 1
 
-    if profile_name not in {"durable", "benchmark"}:
+    if profile_name not in {"durable", "benchmark", "video"}:
         for tile in ordered_grid_tiles[grid_budget:]:
             if len(selected) >= config.max_tiles:
                 break
@@ -912,7 +913,7 @@ def embed_iwm2_packet_into_image(
     config = PROFILES[profile_name]
     low_frequency_first = True
     carrier_packet = packet
-    if profile_name in {"durable", "benchmark"} and watermark_id:
+    if profile_name in {"durable", "benchmark", "video"} and watermark_id:
         carrier_packet = build_micro_auth_packet_bytes(watermark_id, password)
     carrier_packet_len = len(carrier_packet)
     encoded_bits = encoded_auth_bits(carrier_packet, password)
@@ -934,7 +935,7 @@ def embed_iwm2_packet_into_image(
     fallback_metrics: dict[str, float] | None = None
     fallback_scale = config.scales[0]
     min_self_verified = 2
-    if profile_name in {"invisible", "durable", "benchmark"}:
+    if profile_name in {"invisible", "durable", "benchmark", "video"}:
         min_self_verified = 1
 
     for scale in config.scales:
@@ -949,7 +950,7 @@ def embed_iwm2_packet_into_image(
                 config.method,
                 low_frequency_first,
             )
-            if profile_name in {"durable", "benchmark"} and carrier_packet_len == MICRO_AUTH_PACKET_LEN:
+            if profile_name in {"durable", "benchmark", "video"} and carrier_packet_len == MICRO_AUTH_PACKET_LEN:
                 marked_tile, _ = _embed_dark_bits_in_tile(
                     marked_tile,
                     encoded_bits,
@@ -1054,7 +1055,7 @@ def extract_iwm2_image(
     image = Image.open(input_path).convert("YCbCr")
     y_array = np.asarray(image.getchannel("Y"), dtype=np.float32)
     candidates = _candidate_tiles(y_array, None, config, scan_offsets=False, max_tiles=48)
-    if profile_name in {"balanced", "durable", "benchmark"}:
+    if profile_name in {"balanced", "durable", "benchmark", "video"}:
         seen = {(tile.x, tile.y, tile.size) for tile in candidates}
         for tile in _feature_tiles(
             y_array,
@@ -1071,7 +1072,7 @@ def extract_iwm2_image(
         raise PayloadError("No candidate IWM2 tiles were available for recovery.")
 
     packet_modes: list[tuple[int, bool]] = []
-    if profile_name in {"durable", "benchmark"}:
+    if profile_name in {"durable", "benchmark", "video"}:
         packet_modes.append((MICRO_AUTH_PACKET_LEN, True))
     packet_modes.append((AUTH_PACKET_LEN, False))
 
@@ -1190,7 +1191,7 @@ def extract_iwm2_image(
                 used_packet_len = packet_len
                 used_micro_packet = micro_packet
                 break
-    if not groups and profile_name in {"durable", "benchmark"}:
+    if not groups and profile_name in {"durable", "benchmark", "video"}:
         groups, checked, verified_tiles = scan_dark_tiles(candidates, stop_after_verified=2)
         if groups:
             used_packet_len = MICRO_AUTH_PACKET_LEN

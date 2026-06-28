@@ -18,6 +18,7 @@ import {
 
 type Profile = "invisible" | "balanced" | "durable";
 type Mode = "embed" | "read";
+type JobStatus = "idle" | "queued" | "running" | "done" | "error";
 
 type EmbedResultItem = {
   input_path: string;
@@ -29,7 +30,6 @@ type EmbedResultItem = {
   mode?: string;
   quality_psnr?: number;
   quality_ssim?: number;
-  paper_diff?: number;
   tiles_used?: number;
   tiles_total?: number;
   frames_total?: number;
@@ -44,7 +44,6 @@ type ReadResultItem = {
   core_text?: string;
   created_at?: number;
   mode?: string;
-  tiles_total?: number;
   tiles_checked?: number;
   tiles_verified?: number;
   bit_error_estimate?: number;
@@ -53,10 +52,18 @@ type ReadResultItem = {
   frames_verified?: number;
 };
 
+type JobState = {
+  job_id?: string;
+  status: JobStatus;
+  progress: number;
+  message: string;
+  error?: string;
+};
+
 const profiles: Array<{ id: Profile; label: string; note: string }> = [
-  { id: "balanced", label: "均衡", note: "默认档，兼顾无感与认证恢复" },
-  { id: "invisible", label: "无感优先", note: "降低视觉扰动，适合文档和截图" },
-  { id: "durable", label: "持久优先", note: "增强抗压缩、裁剪和转码能力" }
+  { id: "balanced", label: "均衡", note: "日常文件默认推荐" },
+  { id: "invisible", label: "无感优先", note: "尽量降低视觉扰动" },
+  { id: "durable", label: "持久优先", note: "增强抗压缩和裁剪" }
 ];
 
 function SpectrumBackground() {
@@ -86,30 +93,15 @@ function SpectrumBackground() {
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = "#f7f8fb";
       ctx.fillRect(0, 0, width, height);
-
       const grid = 34;
       for (let y = -grid; y < height + grid; y += grid) {
         for (let x = -grid; x < width + grid; x += grid) {
           const wave = Math.sin(x * 0.012 + frame * 8) + Math.cos(y * 0.016 - frame * 6);
-          const alpha = 0.08 + Math.max(0, wave) * 0.035;
+          const alpha = 0.06 + Math.max(0, wave) * 0.025;
           ctx.fillStyle = `rgba(17, 24, 39, ${alpha})`;
           ctx.fillRect(x + Math.sin(frame + y) * 2, y, 1, 1);
         }
       }
-
-      for (let i = 0; i < 8; i += 1) {
-        const y = (height * (i + 1)) / 9;
-        ctx.beginPath();
-        for (let x = 0; x <= width; x += 18) {
-          const offset = Math.sin(x * 0.009 + frame * 12 + i) * (10 + i * 1.2);
-          if (x === 0) ctx.moveTo(x, y + offset);
-          else ctx.lineTo(x, y + offset);
-        }
-        ctx.strokeStyle = `rgba(17, 24, 39, ${0.05 - i * 0.003})`;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-
       raf = requestAnimationFrame(draw);
     };
 
@@ -142,6 +134,28 @@ function metric(value?: number, digits = 2) {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value.toFixed(digits) : "--";
 }
 
+function ProcessingBar({ job }: { job: JobState }) {
+  const progress = Math.max(0, Math.min(100, job.progress || 0));
+  return (
+    <div className="processing-card" aria-live="polite">
+      <div className="processing-head">
+        <span>{job.status === "done" ? "已完成" : job.status === "error" ? "失败" : "处理中"}</span>
+        <strong>{Math.round(progress)}%</strong>
+      </div>
+      <div className="processing-track">
+        <div className="processing-fill" style={{ width: `${progress}%` }} />
+        <div className="processing-sheen" />
+      </div>
+      <div className="processing-steps">
+        {[18, 42, 68, 92].map((mark) => (
+          <i key={mark} className={progress >= mark ? "active" : ""} />
+        ))}
+      </div>
+      <p>{job.message || "等待任务状态..."}</p>
+    </div>
+  );
+}
+
 export function App() {
   const [mode, setMode] = useState<Mode>("embed");
   const [file, setFile] = useState<File | null>(null);
@@ -152,6 +166,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [embedResults, setEmbedResults] = useState<EmbedResultItem[]>([]);
   const [readResult, setReadResult] = useState<ReadResultItem | null>(null);
+  const [job, setJob] = useState<JobState>({ status: "idle", progress: 0, message: "" });
   const [error, setError] = useState("");
   const [sparks, setSparks] = useState<Array<{ id: number; x: number; y: number }>>([]);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -174,6 +189,28 @@ export function App() {
     setError("");
     setEmbedResults([]);
     setReadResult(null);
+    setJob({ status: "idle", progress: 0, message: "" });
+  };
+
+  const pollJob = async (jobId: string) => {
+    while (true) {
+      const response = await fetch(`/api/jobs/${jobId}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Cannot read job status");
+      setJob({
+        job_id: jobId,
+        status: data.status,
+        progress: Number(data.progress || 0),
+        message: data.message || "",
+        error: data.error || ""
+      });
+      if (data.status === "done" || data.status === "error") {
+        if (data.results) setEmbedResults(data.results);
+        if (data.status === "error" && data.error) throw new Error(data.error);
+        break;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 650));
+    }
   };
 
   const submit = async () => {
@@ -189,19 +226,26 @@ export function App() {
         form.set("profile", profile);
         form.set("pdfMode", "both");
         form.set("docxMode", "both");
-        const response = await fetch("/api/watermark", { method: "POST", body: form });
+        setJob({ status: "queued", progress: 1, message: "正在上传文件" });
+        const response = await fetch("/api/watermark/jobs", { method: "POST", body: form });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "处理失败");
-        setEmbedResults(data.results || []);
+        setJob({ job_id: data.job_id, status: "queued", progress: data.progress || 1, message: data.message || "已排队" });
+        await pollJob(data.job_id);
       } else {
         form.set("deepScan", String(deepScan));
+        setJob({ status: "running", progress: 25, message: "正在上传文件" });
         const response = await fetch("/api/read", { method: "POST", body: form });
+        setJob({ status: "running", progress: 72, message: "正在验证水印" });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "读取失败");
         setReadResult(data.result || null);
+        setJob({ status: data.result?.status === "ok" ? "done" : "error", progress: 100, message: data.result?.message || "读取完成" });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "处理失败");
+      const message = err instanceof Error ? err.message : "处理失败";
+      setError(message);
+      setJob((current) => ({ ...current, status: "error", progress: 100, message }));
     } finally {
       setBusy(false);
     }
@@ -249,17 +293,17 @@ export function App() {
               <p className="eyebrow">认证水印工作台</p>
               <h1>{mode === "embed" ? "写入无感认证水印" : "读取并验证隐形水印"}</h1>
             </div>
-            <span className="status-pill">Local only</span>
+            <span className="status-pill">本地处理</span>
           </div>
 
           <div className="mode-tabs" role="tablist">
             <button className={mode === "embed" ? "active" : ""} type="button" onClick={() => { setMode("embed"); resetOutput(); }}>
               <ShieldCheck size={17} />
-              添加水印
+              添加
             </button>
             <button className={mode === "read" ? "active" : ""} type="button" onClick={() => { setMode("read"); resetOutput(); }}>
               <SearchCheck size={17} />
-              读取水印
+              读取
             </button>
           </div>
 
@@ -285,7 +329,7 @@ export function App() {
             <div className="file-orb">{file ? fileIcon(file) : <UploadCloud size={26} />}</div>
             <div>
               <strong>{file ? file.name : "拖入或选择文件"}</strong>
-              <span>支持图片、PDF、DOCX、DOC、MP4、MOV、AVI、MKV、WEBM，本地处理后返回结果</span>
+              <span>支持图片、PDF、DOCX、DOC、MP4、MOV、AVI、MKV、WEBM；视频默认输出 MP4。</span>
             </div>
           </div>
 
@@ -307,12 +351,7 @@ export function App() {
           {mode === "embed" ? (
             <div className="profiles">
               {profiles.map((item) => (
-                <button
-                  key={item.id}
-                  className={profile === item.id ? "active" : ""}
-                  onClick={() => setProfile(item.id)}
-                  type="button"
-                >
+                <button key={item.id} className={profile === item.id ? "active" : ""} onClick={() => setProfile(item.id)} type="button">
                   <strong>{item.label}</strong>
                   <span>{item.note}</span>
                 </button>
@@ -327,9 +366,10 @@ export function App() {
 
           <button className="primary" disabled={!ready} onClick={submit} type="button">
             {busy ? <Loader2 className="spin" size={19} /> : mode === "embed" ? <ShieldCheck size={19} /> : <Eye size={19} />}
-            {busy ? "正在处理" : mode === "embed" ? "添加水印" : "读取水印"}
+            {busy ? "处理中" : mode === "embed" ? "添加水印" : "读取水印"}
           </button>
 
+          {job.status !== "idle" && <ProcessingBar job={job} />}
           {error && <div className="error">{error}</div>}
         </section>
 
@@ -339,19 +379,13 @@ export function App() {
               <p className="eyebrow">输出</p>
               <h2>{mode === "embed" ? "处理结果" : "验证结果"}</h2>
             </div>
-            <span className="status-pill">{busy ? "Running" : "Ready"}</span>
+            <span className="status-pill">{busy ? "运行中" : "就绪"}</span>
           </div>
 
           {!embedResults.length && !readResult && !busy && (
             <div className="empty">
               <Fingerprint size={34} />
-              <span>{mode === "embed" ? "等待一次写入任务" : "等待一次读取验证"}</span>
-            </div>
-          )}
-
-          {busy && (
-            <div className="progress">
-              <div />
+              <span>{mode === "embed" ? "等待添加水印任务" : "等待读取水印任务"}</span>
             </div>
           )}
 
@@ -360,16 +394,16 @@ export function App() {
               {embedResults.map((item, index) => (
                 <article className={`result ${item.status}`} key={`${item.output_path}-${index}`}>
                   <div>
-                    <strong>{item.status === "ok" ? "写入成功" : "处理失败"}</strong>
+                    <strong>{item.status === "ok" ? "水印已添加" : "处理失败"}</strong>
                     <span>{item.message}</span>
                   </div>
                   <dl>
                     <div><dt>模式</dt><dd>{item.mode || "--"}</dd></div>
-                    <div><dt>编号</dt><dd>{item.watermark_id || "--"}</dd></div>
+                    <div><dt>ID</dt><dd>{item.watermark_id || "--"}</dd></div>
                     <div><dt>PSNR</dt><dd>{metric(item.quality_psnr)}</dd></div>
                     <div><dt>SSIM</dt><dd>{metric(item.quality_ssim, 4)}</dd></div>
-                    <div><dt>Tiles</dt><dd>{item.tiles_used || "--"} / {item.tiles_total || "--"}</dd></div>
-                    <div><dt>Frames</dt><dd>{item.frames_marked || "--"} / {item.frames_total || "--"}</dd></div>
+                    <div><dt>Tile</dt><dd>{item.tiles_used || "--"} / {item.tiles_total || "--"}</dd></div>
+                    <div><dt>帧</dt><dd>{item.frames_marked || "--"} / {item.frames_total || "--"}</dd></div>
                   </dl>
                   {item.download_url && (
                     <a className="download" href={item.download_url}>
@@ -385,18 +419,18 @@ export function App() {
           {mode === "read" && readResult && (
             <article className={`result ${readResult.status}`}>
               <div>
-                <strong>{readResult.status === "ok" ? "认证成功" : "认证失败"}</strong>
+                <strong>{readResult.status === "ok" ? "认证成功" : "未认证"}</strong>
                 <span>{readResult.message}</span>
               </div>
               <dl>
                 <div><dt>模式</dt><dd>{readResult.mode || "--"}</dd></div>
-                <div><dt>编号</dt><dd>{readResult.watermark_id || "--"}</dd></div>
-                <div><dt>内容</dt><dd>{readResult.core_text || "--"}</dd></div>
+                <div><dt>ID</dt><dd>{readResult.watermark_id || "--"}</dd></div>
+                <div><dt>文本</dt><dd>{readResult.core_text || "--"}</dd></div>
                 <div><dt>创建时间</dt><dd>{formatDate(readResult.created_at)}</dd></div>
                 <div><dt>置信度</dt><dd>{readResult.confidence ? `${Math.round(readResult.confidence * 100)}%` : "--"}</dd></div>
-                <div><dt>误码估计</dt><dd>{metric(readResult.bit_error_estimate, 4)}</dd></div>
-                <div><dt>Tiles</dt><dd>{readResult.tiles_verified || "--"} / {readResult.tiles_checked || "--"}</dd></div>
-                <div><dt>Frames</dt><dd>{readResult.frames_verified || "--"} / {readResult.frames_checked || "--"}</dd></div>
+                <div><dt>误码</dt><dd>{metric(readResult.bit_error_estimate, 4)}</dd></div>
+                <div><dt>Tile</dt><dd>{readResult.tiles_verified || "--"} / {readResult.tiles_checked || "--"}</dd></div>
+                <div><dt>帧</dt><dd>{readResult.frames_verified || "--"} / {readResult.frames_checked || "--"}</dd></div>
               </dl>
             </article>
           )}

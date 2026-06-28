@@ -33,7 +33,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_env.ps1 -Use
 | PDF | pdf | pdf | keep/strong 两层 |
 | DOCX | docx | docx/pdf | keep 输出 DOCX，strong 输出 PDF |
 | DOC | doc | docx/pdf | 需要 LibreOffice 转换 |
-| 视频 | mp4/mov/avi/mkv/webm/m4v | avi | 使用 FFV1 无损容器保存关键帧水印 |
+| 视频 | mp4/mov/avi/mkv/webm/m4v | mp4 | 默认输出 MP4，使用快速关键帧认证水印 |
 
 ## 5. 口令与认证
 
@@ -62,4 +62,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_env.ps1 -Use
 
 ### 读取失败
 
-确认口令正确；图片/PDF 截图类文件可以勾选深度扫描。视频读取建议使用程序生成的 AVI 文件，不建议读取二次低码率压缩后的 MP4。
+确认口令正确；图片/PDF 截图类文件可以勾选深度扫描。视频读取建议使用程序生成的 MP4 文件，不建议读取二次低码率压缩或平台再次转码后的文件。

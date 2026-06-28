@@ -1,7 +1,8 @@
 param(
     [int]$ApiPort = 8765,
     [int]$WebPort = 5173,
-    [switch]$OpenBrowser
+    [switch]$OpenBrowser,
+    [switch]$ReuseExisting
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,6 +69,26 @@ function Get-ListeningPid($Port) {
     return $null
 }
 
+function Stop-ProcessTree($ProcessId) {
+    if (-not $ProcessId) {
+        return
+    }
+    try {
+        $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue
+        foreach ($child in $children) {
+            Stop-ProcessTree ([int]$child.ProcessId)
+        }
+    } catch {
+    }
+    try {
+        $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if ($proc) {
+            Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+    }
+}
+
 function Open-Url($Url) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Url
@@ -90,13 +111,21 @@ New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 $apiExisting = Get-ListeningPid $ApiPort
 $webExisting = Get-ListeningPid $WebPort
 if ($apiExisting -and $webExisting) {
-    Write-Info "Already running."
-    Write-Info "API: http://127.0.0.1:$ApiPort"
-    Write-Info "App: http://127.0.0.1:$WebPort"
-    if ($OpenBrowser) {
-        Open-Url "http://127.0.0.1:$WebPort"
+    if ($ReuseExisting) {
+        Write-Info "Already running."
+        Write-Info "API: http://127.0.0.1:$ApiPort"
+        Write-Info "App: http://127.0.0.1:$WebPort"
+        if ($OpenBrowser) {
+            Open-Url "http://127.0.0.1:$WebPort"
+        }
+        exit 0
     }
-    exit 0
+    Write-Info "Restarting existing web service to load the latest code..."
+    Stop-ProcessTree $apiExisting
+    Stop-ProcessTree $webExisting
+    Start-Sleep -Seconds 1
+    $apiExisting = $null
+    $webExisting = $null
 }
 
 $python = Resolve-Python

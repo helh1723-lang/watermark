@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import threading
+import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,10 +19,25 @@ RUNTIME_DIR = ROOT / ".runtime" / "web"
 UPLOAD_DIR = RUNTIME_DIR / "uploads"
 OUTPUT_DIR = RUNTIME_DIR / "outputs"
 DOWNLOADS: dict[str, Path] = {}
+JOBS: dict[str, dict[str, object]] = {}
+JOB_LOCK = threading.Lock()
 
 
 def _json_bytes(payload: object) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _set_job(job_key: str, **updates: object) -> None:
+    with JOB_LOCK:
+        job = JOBS.setdefault(job_key, {})
+        job.update(updates)
+        job["updated_at"] = time.time()
+
+
+def _get_job(job_key: str) -> dict[str, object] | None:
+    with JOB_LOCK:
+        job = JOBS.get(job_key)
+        return dict(job) if job else None
 
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -68,6 +85,11 @@ class WebHandler(BaseHTTPRequestHandler):
             path = DOWNLOADS.get(token)
             self._send_file(path) if path else self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown download."})
             return
+        if parsed.path.startswith("/api/jobs/"):
+            job_id = unquote(parsed.path.rsplit("/", 1)[-1])
+            job = _get_job(job_id)
+            self._send_json(HTTPStatus.OK, job) if job else self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown job."})
+            return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint."})
 
     def do_POST(self) -> None:
@@ -76,6 +98,13 @@ class WebHandler(BaseHTTPRequestHandler):
             try:
                 response = self._handle_watermark()
                 self._send_json(HTTPStatus.OK, response)
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if parsed.path == "/api/watermark/jobs":
+            try:
+                response = self._handle_watermark_job()
+                self._send_json(HTTPStatus.ACCEPTED, response)
             except Exception as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
@@ -148,6 +177,80 @@ class WebHandler(BaseHTTPRequestHandler):
                 DOWNLOADS[token] = Path(str(output_path))
                 item["download_url"] = f"/api/download/{token}"
         return {"job_id": job_id, "results": payload}
+
+    def _handle_watermark_job(self) -> dict[str, object]:
+        form = self._read_multipart()
+        upload = form["file"] if "file" in form else None
+        if upload is None or not getattr(upload, "filename", ""):
+            raise ValueError("No file was uploaded.")
+        text = str(form.getfirst("text", "")).strip()
+        password = str(form.getfirst("password", "")).strip()
+        profile = str(form.getfirst("profile", "balanced")).strip() or "balanced"
+        pdf_mode = str(form.getfirst("pdfMode", "both")).strip() or "both"
+        docx_mode = str(form.getfirst("docxMode", "both")).strip() or "both"
+        if not text:
+            raise ValueError("Watermark text cannot be empty.")
+        if not password:
+            raise ValueError("Password cannot be empty.")
+
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        job_id = uuid.uuid4().hex
+        safe_name = Path(str(upload.filename)).name
+        input_path = UPLOAD_DIR / f"{job_id}_{safe_name}"
+        with open(input_path, "wb") as handle:
+            shutil.copyfileobj(upload.file, handle)
+
+        output_dir = OUTPUT_DIR / job_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _set_job(
+            job_id,
+            job_id=job_id,
+            status="queued",
+            progress=1,
+            message="已排队",
+            results=[],
+            error="",
+            created_at=time.time(),
+        )
+
+        def progress(percent: float, message: str) -> None:
+            _set_job(job_id, status="running", progress=percent, message=message)
+
+        def worker() -> None:
+            try:
+                _set_job(job_id, status="running", progress=3, message="开始水印任务")
+                results = embed_file(
+                    input_path,
+                    output_dir,
+                    text,
+                    password,
+                    profile=profile,
+                    pdf_mode=pdf_mode,
+                    docx_mode=docx_mode,
+                    progress_callback=progress,
+                )
+                payload = results_as_dicts(results)
+                for item in payload:
+                    output_path = item.get("output_path")
+                    if output_path:
+                        token = uuid.uuid4().hex
+                        DOWNLOADS[token] = Path(str(output_path))
+                        item["download_url"] = f"/api/download/{token}"
+                failed = [item for item in payload if item.get("status") == "error"]
+                _set_job(
+                    job_id,
+                    status="error" if failed and len(failed) == len(payload) else "done",
+                    progress=100,
+                    message="水印任务完成" if not failed else "水印任务完成，但部分文件失败",
+                    results=payload,
+                    error="",
+                )
+            except Exception as exc:
+                _set_job(job_id, status="error", progress=100, message="水印任务失败", error=str(exc), results=[])
+
+        threading.Thread(target=worker, daemon=True).start()
+        return {"job_id": job_id, "status": "queued", "progress": 1, "message": "已排队"}
 
     def _handle_read(self) -> dict[str, object]:
         form = self._read_multipart()

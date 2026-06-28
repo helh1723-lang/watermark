@@ -30,6 +30,7 @@ STRENGTHS = {
     "subtle": {"delta": 10.0, "target_repeat": 2},
     "balanced": {"delta": 18.0, "target_repeat": 3},
     "strong": {"delta": 30.0, "target_repeat": 5},
+    "video": {"delta": 46.0, "target_repeat": 7},
 }
 
 
@@ -286,6 +287,35 @@ def extract_image_legacy(input_path: str | Path, password: str) -> ExtractResult
     raise PayloadError("No valid invisible watermark could be recovered.")
 
 
+def extract_fixed_packet_legacy(input_path: str | Path, password: str, packet_len: int = AUTH_PACKET_LEN) -> ExtractResult:
+    image = Image.open(input_path).convert("YCbCr")
+    y_array = np.asarray(image.getchannel("Y"), dtype=np.float32)
+    height, width = y_array.shape
+    capacity = len(_available_slots(width, height))
+    last_error: Exception | None = None
+
+    for repeat in REPEAT_TRIES:
+        try:
+            if packet_len * 8 * repeat > capacity:
+                continue
+            packet_bits = _read_repeated_bits(y_array, width, height, password, packet_len * 8, repeat)
+            packet = bits_to_bytes(packet_bits)
+            payload = parse_payload_bytes(packet, password)
+            return ExtractResult(
+                payload=payload,
+                repeat=repeat,
+                payload_bytes=packet_len,
+                algorithm="image-dct-auth",
+                profile="video-fast",
+            )
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise PayloadError(f"No valid fixed-length DCT watermark could be recovered: {last_error}") from last_error
+    raise PayloadError("No valid fixed-length DCT watermark could be recovered.")
+
+
 def embed_image(
     input_path: str | Path,
     output_dir: str | Path,
@@ -323,14 +353,14 @@ def extract_image(input_path: str | Path, password: str, deep_scan: bool = False
             metadata_profile = str(meta_image.info.get("iwm_profile", ""))
     except Exception:
         metadata_profile = ""
-    base_profiles = ("balanced", "durable", "invisible", "benchmark")
+    base_profiles = ("balanced", "durable", "video", "invisible", "benchmark")
     if metadata_profile in base_profiles:
         if deep_scan:
             profiles = (metadata_profile,) + tuple(profile for profile in base_profiles if profile != metadata_profile)
         else:
             profiles = (metadata_profile,)
     elif deep_scan:
-        profiles = ("durable", "balanced", "benchmark", "invisible")
+        profiles = ("video", "durable", "balanced", "benchmark", "invisible")
     else:
         profiles = base_profiles
 

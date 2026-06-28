@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .docx_adapter import embed_doc_keep, embed_doc_strong, embed_docx_keep, embed_docx_strong, extract_docx_keep
 from .image_watermark import embed_image, extract_image
@@ -18,6 +18,12 @@ PDF_EXTS = {".pdf"}
 DOCX_EXTS = {".docx"}
 DOC_EXTS = {".doc"}
 SUPPORTED_EXTS = IMAGE_EXTS | PDF_EXTS | DOCX_EXTS | DOC_EXTS | VIDEO_EXTS
+ProgressCallback = Callable[[float, str], None]
+
+
+def _progress(callback: ProgressCallback | None, percent: float, message: str) -> None:
+    if callback:
+        callback(max(0.0, min(100.0, float(percent))), message)
 
 
 @dataclass
@@ -74,6 +80,7 @@ def embed_file(
     pdf_mode: str = "both",
     docx_mode: str = "both",
     record_store: RecordStore | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[ProcessResult]:
     input_path = Path(input_path)
     output_dir = Path(output_dir)
@@ -98,7 +105,9 @@ def embed_file(
         )
 
     try:
+        _progress(progress_callback, 3, f"检查文件 {input_path.name}")
         if suffix in IMAGE_EXTS:
+            _progress(progress_callback, 15, f"写入图片水印：{input_path.name}")
             embedded = embed_image(input_path, output_dir, text, password, strength, profile=profile)
             result = ProcessResult(
                 str(input_path),
@@ -115,12 +124,14 @@ def embed_file(
                 embedded.tiles_used,
             )
             add_record(result)
+            _progress(progress_callback, 95, f"图片水印完成：{input_path.name}")
             return [result]
 
         if suffix in PDF_EXTS:
             modes = ["keep", "strong"] if pdf_mode == "both" else [pdf_mode]
             for mode in modes:
                 try:
+                    _progress(progress_callback, 15 if mode == modes[0] else 55, f"写入 PDF {mode} 水印：{input_path.name}")
                     pdf_result = (
                         embed_pdf_metadata(input_path, output_dir, text, password)
                         if mode == "keep"
@@ -142,6 +153,7 @@ def embed_file(
                     )
                     add_record(result)
                     results.append(result)
+                    _progress(progress_callback, 50 if mode == modes[0] and len(modes) > 1 else 95, f"PDF {mode} 完成：{input_path.name}")
                 except Exception as exc:
                     results.append(ProcessResult(str(input_path), "error", f"PDF {mode} failed: {exc}", mode=mode))
             return results
@@ -150,6 +162,7 @@ def embed_file(
             modes = ["keep", "strong"] if docx_mode == "both" else [docx_mode]
             for mode in modes:
                 try:
+                    _progress(progress_callback, 15 if mode == modes[0] else 55, f"写入 DOCX {mode} 水印：{input_path.name}")
                     doc_result = (
                         embed_docx_keep(input_path, output_dir, text, password)
                         if mode == "keep"
@@ -171,6 +184,7 @@ def embed_file(
                     )
                     add_record(result)
                     results.append(result)
+                    _progress(progress_callback, 50 if mode == modes[0] and len(modes) > 1 else 95, f"DOCX {mode} 完成：{input_path.name}")
                 except Exception as exc:
                     results.append(ProcessResult(str(input_path), "error", f"DOCX {mode} failed: {exc}", mode=mode))
             return results
@@ -179,6 +193,7 @@ def embed_file(
             modes = ["keep", "strong"] if docx_mode == "both" else [docx_mode]
             for mode in modes:
                 try:
+                    _progress(progress_callback, 15 if mode == modes[0] else 55, f"转换 DOC 并写入 {mode} 水印：{input_path.name}")
                     doc_result = (
                         embed_doc_keep(input_path, output_dir, text, password)
                         if mode == "keep"
@@ -200,12 +215,26 @@ def embed_file(
                     )
                     add_record(result)
                     results.append(result)
+                    _progress(progress_callback, 50 if mode == modes[0] and len(modes) > 1 else 95, f"DOC {mode} 完成：{input_path.name}")
                 except Exception as exc:
                     results.append(ProcessResult(str(input_path), "error", f"DOC {mode} failed: {exc}", mode=mode))
             return results
 
         if suffix in VIDEO_EXTS:
-            video_result = embed_video(input_path, output_dir, text, password, strength=strength, profile=profile)
+            _progress(progress_callback, 12, f"解码并写入视频帧水印：{input_path.name}")
+            video_result = embed_video(
+                input_path,
+                output_dir,
+                text,
+                password,
+                strength=strength,
+                profile=profile,
+                progress_callback=lambda percent, message: _progress(
+                    progress_callback,
+                    12 + percent * 0.82,
+                    message,
+                ),
+            )
             result = ProcessResult(
                 str(input_path),
                 "ok",
@@ -223,6 +252,7 @@ def embed_file(
                 video_result.frames_marked,
             )
             add_record(result)
+            _progress(progress_callback, 95, f"视频水印完成：{input_path.name}")
             return [result]
         return [ProcessResult(str(input_path), "skipped", "Unsupported file type.")]
     except Exception as exc:
@@ -238,13 +268,26 @@ def embed_many(
     profile: str = "balanced",
     pdf_mode: str = "both",
     docx_mode: str = "both",
+    progress_callback: ProgressCallback | None = None,
 ) -> list[ProcessResult]:
     store = RecordStore(Path(output_dir) / "watermark_records.json")
     all_results: list[ProcessResult] = []
-    for input_path in inputs:
+    input_list = list(inputs)
+    total = max(1, len(input_list))
+    _progress(progress_callback, 0, "准备水印任务")
+    for index, input_path in enumerate(input_list, start=1):
+        base = (index - 1) * 100.0 / total
+        span = 100.0 / total
+
+        def child_progress(percent: float, message: str, *, base: float = base, span: float = span, index: int = index) -> None:
+            _progress(progress_callback, base + span * percent / 100.0, f"{index}/{total} {message}")
+
+        _progress(progress_callback, base, f"{index}/{total} 开始处理 {input_path.name}")
         all_results.extend(
-            embed_file(input_path, output_dir, text, password, strength, profile, pdf_mode, docx_mode, store)
+            embed_file(input_path, output_dir, text, password, strength, profile, pdf_mode, docx_mode, store, child_progress)
         )
+        _progress(progress_callback, index * 100.0 / total, f"{index}/{total} 完成 {input_path.name}")
+    _progress(progress_callback, 100, "水印任务完成")
     return all_results
 
 

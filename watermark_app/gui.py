@@ -38,6 +38,7 @@ class WatermarkApp(tk.Tk):
         self.pdf_mode = tk.StringVar(value="both")
         self.doc_mode = tk.StringVar(value="both")
         self.deep_scan = tk.BooleanVar(value=True)
+        self.progress_text = tk.StringVar(value="就绪")
 
         self._build()
         self.after(100, self._drain_queue)
@@ -92,7 +93,7 @@ class WatermarkApp(tk.Tk):
 
         ttk.Label(
             embed_tab,
-            text="支持：图片、PDF、DOCX、DOC、MP4、MOV、AVI、MKV、WEBM、M4V。DOC/DOCX strong 需要 LibreOffice；视频输出为 AVI/FFV1。",
+            text="支持：图片、PDF、DOCX、DOC、MP4、MOV、AVI、MKV、WEBM、M4V。DOC/DOCX strong 需要 LibreOffice；视频默认输出为 MP4。",
             foreground="#475569",
         ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(0, 8))
 
@@ -111,8 +112,9 @@ class WatermarkApp(tk.Tk):
 
         output_frame = ttk.LabelFrame(self, text="处理日志", padding=8)
         output_frame.pack(fill="both", expand=False, padx=10, pady=(0, 10))
-        self.progress = ttk.Progressbar(output_frame, mode="indeterminate")
+        self.progress = ttk.Progressbar(output_frame, mode="determinate", maximum=100)
         self.progress.pack(fill="x", pady=(0, 6))
+        ttk.Label(output_frame, textvariable=self.progress_text).pack(fill="x", pady=(0, 6))
         self.log = tk.Text(output_frame, height=12, wrap="word")
         self.log.pack(fill="both", expand=True)
 
@@ -166,6 +168,9 @@ class WatermarkApp(tk.Tk):
     def _control(self, name: str) -> None:
         self.work_queue.put(("control", name))
 
+    def _progress(self, percent: float, message: str) -> None:
+        self.work_queue.put(("progress", percent, message))
+
     def _drain_queue(self) -> None:
         while True:
             try:
@@ -174,13 +179,22 @@ class WatermarkApp(tk.Tk):
                 break
             if isinstance(message, tuple) and message[:1] == ("control",):
                 if message[1] == "busy":
-                    self.progress.start(12)
+                    self.progress.configure(mode="determinate")
+                    self.progress["value"] = 0
+                    self.progress_text.set("0% - 正在开始")
                     self.embed_button.configure(state="disabled")
                     self.read_button.configure(state="disabled")
                 elif message[1] == "idle":
-                    self.progress.stop()
+                    self.progress["value"] = 100
+                    self.progress_text.set("已完成")
                     self.embed_button.configure(state="normal")
                     self.read_button.configure(state="normal")
+                continue
+            if isinstance(message, tuple) and message[:1] == ("progress",):
+                percent = float(message[1])
+                detail = str(message[2])
+                self.progress["value"] = percent
+                self.progress_text.set(f"{percent:.0f}% - {detail}")
                 continue
             self.log.insert("end", str(message) + "\n")
             self.log.see("end")
@@ -222,6 +236,7 @@ class WatermarkApp(tk.Tk):
                     self.profile.get(),
                     self.pdf_mode.get(),
                     self.doc_mode.get(),
+                    self._progress,
                 )
                 for result in results:
                     self._log(self._format_process_result(result))
@@ -259,9 +274,12 @@ class WatermarkApp(tk.Tk):
 
         def worker() -> None:
             self._control("busy")
+            self._progress(10, "准备读取任务")
             self._log("开始读取/验证水印...")
             try:
+                self._progress(35, f"正在读取 {Path(path).name}")
                 result = read_file(path, self.password.get(), deep_scan=self.deep_scan.get())
+                self._progress(90, "解析验证结果")
                 self._log(f"[{result.status}] {result.message}")
                 if result.status == "ok":
                     self._log(f"ID: {result.watermark_id}")
@@ -275,6 +293,7 @@ class WatermarkApp(tk.Tk):
             except Exception as exc:
                 self._log(f"[error] {exc}")
             finally:
+                self._progress(100, "读取任务完成")
                 self._control("idle")
 
         threading.Thread(target=worker, daemon=True).start()
