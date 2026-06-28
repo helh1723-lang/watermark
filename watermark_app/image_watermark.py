@@ -189,10 +189,26 @@ def embed_packet_into_image(
     input_path = Path(input_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    image = Image.open(input_path)
+    marked, repeat = embed_packet_into_pil(image, packet, password, strength)
+    output_path = output_dir / output_name if output_name else _normal_output_path(input_path, output_dir)
+    output_path = unique_output_path(output_path)
+    save_kwargs = {}
+    if output_path.suffix.lower() in {".jpg", ".jpeg"}:
+        save_kwargs["quality"] = 95
+    marked.save(output_path, **save_kwargs)
+    return output_path, repeat
+
+
+def embed_packet_into_pil(
+    image: Image.Image,
+    packet: bytes,
+    password: str,
+    strength: str = "balanced",
+) -> tuple[Image.Image, int]:
     params = STRENGTHS.get(strength, STRENGTHS["balanced"])
     bits = bytes_to_bits(packet)
 
-    image = Image.open(input_path)
     alpha = None
     if image.mode in {"RGBA", "LA"}:
         alpha = image.getchannel("A")
@@ -216,13 +232,7 @@ def embed_packet_into_image(
     marked = Image.merge("YCbCr", (y_marked, cb, cr)).convert("RGB")
     if alpha is not None:
         marked.putalpha(alpha)
-    output_path = output_dir / output_name if output_name else _normal_output_path(input_path, output_dir)
-    output_path = unique_output_path(output_path)
-    save_kwargs = {}
-    if output_path.suffix.lower() in {".jpg", ".jpeg"}:
-        save_kwargs["quality"] = 95
-    marked.save(output_path, **save_kwargs)
-    return output_path, repeat
+    return marked, repeat
 
 
 def _read_repeated_bits(
@@ -288,7 +298,12 @@ def extract_image_legacy(input_path: str | Path, password: str) -> ExtractResult
 
 
 def extract_fixed_packet_legacy(input_path: str | Path, password: str, packet_len: int = AUTH_PACKET_LEN) -> ExtractResult:
-    image = Image.open(input_path).convert("YCbCr")
+    image = Image.open(input_path)
+    return extract_fixed_packet_from_pil(image, password, packet_len)
+
+
+def extract_fixed_packet_from_pil(image: Image.Image, password: str, packet_len: int = AUTH_PACKET_LEN) -> ExtractResult:
+    image = image.convert("YCbCr")
     y_array = np.asarray(image.getchannel("Y"), dtype=np.float32)
     height, width = y_array.shape
     capacity = len(_available_slots(width, height))

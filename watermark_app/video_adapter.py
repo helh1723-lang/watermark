@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Callable
 
 import cv2
+import numpy as np
 from PIL import Image
 
-from .image_watermark import embed_packet_into_image, extract_fixed_packet_legacy, extract_image
+from .image_watermark import embed_packet_into_pil, extract_fixed_packet_from_pil, extract_image
 from .paths import unique_output_path
 from .payload import Payload, build_auth_packet_bytes, build_payload_bytes, file_sha256
 from .robust_watermark import normalize_profile
@@ -188,19 +189,14 @@ def embed_video(
                 frame_label = f"{index + 1}/{frames_total}" if frames_total else str(index + 1)
                 if index % progress_step == 0:
                     progress_callback(10 + min(75, (index / max(1, frames_total or index + 1)) * 75), f"写入视频帧 {frame_label}")
-            frame_path = tmp_dir / f"frame_{index:08d}.png"
-            marked_path = tmp_dir / f"marked_{index:08d}.png"
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            Image.fromarray(rgb).save(frame_path)
-            marked_output, repeat = embed_packet_into_image(
-                frame_path,
-                tmp_dir,
+            marked_image, repeat = embed_packet_into_pil(
+                Image.fromarray(rgb),
                 auth_packet,
                 password,
-                output_name=marked_path.name,
                 strength="video",
             )
-            marked_rgb = cv2.cvtColor(cv2.imread(str(marked_output)), cv2.COLOR_BGR2RGB)
+            marked_rgb = np.asarray(marked_image.convert("RGB"))
             frame = cv2.cvtColor(marked_rgb, cv2.COLOR_RGB2BGR)
             tiles_total += repeat
             tiles_used += repeat
@@ -234,7 +230,7 @@ def extract_video(
     input_path: str | Path,
     password: str,
     deep_scan: bool = False,
-    max_frames: int = 24,
+    max_frames: int = 8,
 ) -> VideoExtractResult:
     input_path = Path(input_path)
     cap = cv2.VideoCapture(str(input_path))
@@ -252,36 +248,29 @@ def extract_video(
         tmp_dir = Path(tmp_name)
         frame_indices = _sample_frame_indices(frames_total, fps, max_frames)
 
-        def try_frame(frame, index: int, use_deep_scan: bool = False) -> bool:
+        def try_frame(frame, index: int) -> bool:
             nonlocal best, frames_checked, frames_verified, last_error
-            frame_path = tmp_dir / f"read_{index:08d}_{frames_checked:03d}.png"
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            Image.fromarray(rgb).save(frame_path)
-            saved_frames.append(frame_path)
+            image = Image.fromarray(rgb)
             frames_checked += 1
             try:
-                extracted = extract_fixed_packet_legacy(frame_path, password)
+                extracted = extract_fixed_packet_from_pil(image, password)
                 frames_verified += 1
                 if best is None or extracted.confidence > best.confidence:
                     best = extracted
                 return True
             except Exception as exc:
                 last_error = exc
-            try:
-                extracted = extract_image(frame_path, password, deep_scan=use_deep_scan)
-                frames_verified += 1
-                if best is None or extracted.confidence > best.confidence:
-                    best = extracted
-                return True
-            except Exception as exc:
-                last_error = exc
-                return False
+            frame_path = tmp_dir / f"read_{index:08d}_{frames_checked:03d}.png"
+            image.save(frame_path)
+            saved_frames.append(frame_path)
+            return False
 
         if frame_indices:
             for index in frame_indices:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, index)
                 ok, frame = cap.read()
-                if ok and try_frame(frame, index, False):
+                if ok and try_frame(frame, index):
                     break
         else:
             index = 0
@@ -289,12 +278,12 @@ def extract_video(
                 ok, frame = cap.read()
                 if not ok:
                     break
-                if index % interval == 0 and try_frame(frame, index, False):
+                if index % interval == 0 and try_frame(frame, index):
                     break
                 index += 1
 
         if best is None and deep_scan:
-            for frame_path in saved_frames[: min(3, len(saved_frames))]:
+            for frame_path in saved_frames[: min(2, len(saved_frames))]:
                 try:
                     extracted = extract_image(frame_path, password, deep_scan=True)
                     frames_verified += 1
@@ -310,7 +299,7 @@ def extract_video(
                 ok, frame = cap.read()
                 if not ok:
                     break
-                if index % interval == 0 and try_frame(frame, index, deep_scan):
+                if index % interval == 0 and try_frame(frame, index):
                     break
                 index += 1
     cap.release()
