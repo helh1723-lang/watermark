@@ -163,11 +163,11 @@ def embed_file(
                         doc_result.watermark_id,
                         doc_result.core_text,
                         doc_result.mode,
-                        doc_result.quality_psnr,
-                        doc_result.quality_ssim,
-                        doc_result.paper_diff,
-                        doc_result.tiles_total,
-                        doc_result.tiles_used,
+                        getattr(doc_result, "quality_psnr", 0.0),
+                        getattr(doc_result, "quality_ssim", 0.0),
+                        getattr(doc_result, "paper_diff", 0.0),
+                        getattr(doc_result, "tiles_total", 0),
+                        getattr(doc_result, "tiles_used", 0),
                     )
                     add_record(result)
                     results.append(result)
